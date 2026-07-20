@@ -1,8 +1,8 @@
 # Build cache
 
 Cargo stores the output of a build into the "target" and "build" directories. By default,
-both directories point to a directory named `target` in the root of your
-[*workspace*][def-workspace]. To change the location of the target-dir, you can set the
+the target-dir is named `target` in the root of your [*workspace*][def-workspace], while
+the build-dir is shared at `$CARGO_HOME/build`. To change the location of the target-dir, you can set the
 `CARGO_TARGET_DIR` [environment variable], the [`build.target-dir`] config
 value, or the `--target-dir` command-line flag. To change the location of the build-dir, you can set the
 `CARGO_BUILD_BUILD_DIR` [environment variable] or the [`build.build-dir`] config value.

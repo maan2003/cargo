@@ -845,6 +845,9 @@ macro_rules! unstable_cli_options {
                 };
 
                 unstable.build_dir_new_layout = !is_new_build_dir_layout_opt_out();
+                // This fork: the shared build cache, which needs the new layout.
+                unstable.fine_grain_locking = unstable.build_dir_new_layout;
+                unstable.gc = true;
 
                 return unstable;
             }

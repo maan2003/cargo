@@ -496,18 +496,10 @@ impl<'gctx> Workspace<'gctx> {
     }
 
     fn default_build_dir(&self) -> Filesystem {
-        if self.root_maybe().is_embedded() {
-            let default = ConfigRelativePath::new(
-                "{cargo-cache-home}/build/{workspace-path-hash}"
-                    .to_owned()
-                    .into(),
-            );
-            self.gctx()
-                .custom_build_dir(&default, self.root_manifest())
-                .expect("template is correct")
-        } else {
-            self.default_target_dir()
-        }
+        let default = ConfigRelativePath::new("{cargo-cache-home}/build".to_owned().into());
+        self.gctx()
+            .custom_build_dir(&default, self.root_manifest())
+            .expect("template is correct")
     }
 
     /// Returns the root `[replace]` section of this workspace.
