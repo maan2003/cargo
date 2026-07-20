@@ -1589,6 +1589,8 @@ This will not affect any hard-coded paths in the source code, such as in strings
 
 The `-Zgc` flag is used to enable certain features related to garbage-collection of cargo's global cache within the cargo home directory.
 
+This is enabled by default in this Cargo fork, so passing `-Zgc` is optional.
+
 #### Automatic gc configuration
 
 The `-Zgc` flag will enable Cargo to read extra configuration options related to garbage collection.
@@ -1695,6 +1697,8 @@ panic = "immediate-abort"
 * Tracking Issue: [#4282](https://github.com/rust-lang/cargo/issues/4282)
 
 Use fine grain locking instead of locking the entire build cache.
+
+This is enabled by default in this Cargo fork.
 
 Note: Fine grain locking implicitly enables [build-dir-new-layout](#build-dir-new-layout) as fine grain locking builds on that directory reoganization.
 
@@ -1971,6 +1975,8 @@ The following commands are available under `-Zbuild-analysis`:
 
 Enables the new build-dir filesystem layout.
 This layout change unblocks work towards caching and locking improvements.
+
+This is enabled by default in this Cargo fork.
 
 
 ## compile-time-deps

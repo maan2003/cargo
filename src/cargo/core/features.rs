@@ -814,7 +814,7 @@ macro_rules! unstable_cli_options {
         /// Cargo, like `rustc`, accepts a suite of `-Z` flags which are intended for
         /// gating unstable functionality to Cargo. These flags are only available on
         /// the nightly channel of Cargo.
-        #[derive(Default, Debug, Deserialize)]
+        #[derive(Debug, Deserialize)]
         #[serde(default, rename_all = "kebab-case")]
         pub struct CliUnstable {
             $(
@@ -828,6 +828,17 @@ macro_rules! unstable_cli_options {
             pub fn help() -> Vec<(&'static str, Option<&'static str>)> {
                 let fields = vec![$((stringify!($element), None$(.or(Some($help)))?)),*];
                 fields
+            }
+        }
+        impl Default for CliUnstable {
+            fn default() -> Self {
+                let mut options = Self {
+                    $($element: Default::default()),*
+                };
+                options.build_dir_new_layout = true;
+                options.fine_grain_locking = true;
+                options.gc = true;
+                options
             }
         }
 
@@ -1270,6 +1281,13 @@ impl CliUnstable {
             self.gitoxide = GitoxideFeatures::safe().into();
         }
 
+        // NOTE: We set this before `implicitly_enable_features_if_needed` as `-Zfine-grain-locking`
+        //       must use the new layout so that takes priority.
+        if is_new_build_dir_layout_opt_out() {
+            self.build_dir_new_layout = false;
+            self.fine_grain_locking = false;
+        }
+
         self.implicitly_enable_features_if_needed();
 
         Ok(warnings)
@@ -1590,6 +1608,14 @@ pub fn channel() -> String {
 )]
 fn cargo_use_gitoxide_instead_of_git2() -> bool {
     std::env::var_os("__CARGO_USE_GITOXIDE_INSTEAD_OF_GIT2").map_or(false, |value| value == "1")
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    reason = "Temporary opt out that is not part of the public interface"
+)]
+fn is_new_build_dir_layout_opt_out() -> bool {
+    std::env::var("__CARGO_TEMPORARY_BUILD_DIR_NEW_LAYOUT_OPT_OUT").as_deref() == Ok("1")
 }
 
 /// Generate a link to Cargo documentation for the current release channel

@@ -78,6 +78,18 @@ use cargo_test_support::{paths, prelude::*, project, str};
 use std::env::consts::{DLL_PREFIX, DLL_SUFFIX, EXE_SUFFIX};
 
 #[cargo_test]
+fn shared_v2_build_dir_and_fine_grain_locking_are_defaults() {
+    let project = project().file("src/main.rs", "fn main() {}").build();
+
+    project.cargo("build").run();
+
+    assert_exists(&project.root().join(format!("target/debug/foo{EXE_SUFFIX}")));
+    assert_exists_patterns_with_base_dir(&paths::home(), &[".cargo/build/debug/build/foo/*/.lock"]);
+    project.cargo("clean gc --max-build-age=30days").run();
+}
+
+
+#[cargo_test]
 fn binary_with_debug() {
     let p = project()
         .file("src/main.rs", r#"fn main() { println!("Hello, World!") }"#)
