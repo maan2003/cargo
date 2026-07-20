@@ -19,6 +19,67 @@ use cargo_test_support::{paths, prelude::*, project, str};
 use std::env::consts::{DLL_PREFIX, DLL_SUFFIX, EXE_SUFFIX};
 
 #[cargo_test]
+fn shared_build_dir_separates_path_units_by_workspace_inode() {
+    Package::new("shared-dep", "1.0.0")
+        .file("src/lib.rs", "pub fn shared() {}")
+        .publish();
+
+    let manifest = r#"
+        [package]
+        name = "local"
+        version = "0.1.0"
+
+        [dependencies]
+        shared-dep = "1.0"
+    "#;
+    let first = project()
+        .at("first")
+        .file("Cargo.toml", manifest)
+        .file("src/main.rs", "fn main() { shared_dep::shared(); }")
+        .build();
+    let second = project()
+        .at("second")
+        .file("Cargo.toml", manifest)
+        .file("src/main.rs", "fn main() { shared_dep::shared(); }")
+        .build();
+    let shared_build_dir = paths::root().join("shared-build");
+
+    for project in [&first, &second] {
+        project
+            .cargo("-Zbuild-dir-new-layout -Zfine-grain-locking build")
+            .masquerade_as_nightly_cargo(&["new build-dir layout", "fine grain locking"])
+            .env("CARGO_BUILD_BUILD_DIR", &shared_build_dir)
+            .run();
+    }
+
+    let build_units = shared_build_dir.join("debug/build");
+    assert_eq!(
+        build_units.join("shared-dep").read_dir().unwrap().count(),
+        1
+    );
+    assert_eq!(build_units.join("local").read_dir().unwrap().count(), 2);
+
+    let old = filetime::FileTime::from_system_time(
+        std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 24 * 60 * 60),
+    );
+    for unit in build_units.join("local").read_dir().unwrap() {
+        filetime::set_file_mtime(unit.unwrap().path().join(".lock"), old).unwrap();
+    }
+    first
+        .cargo("-Zbuild-dir-new-layout -Zfine-grain-locking build")
+        .masquerade_as_nightly_cargo(&["new build-dir layout", "fine grain locking"])
+        .env("CARGO_BUILD_BUILD_DIR", &shared_build_dir)
+        .run();
+
+    first
+        .cargo("clean gc -Zgc --max-build-age=1day")
+        .masquerade_as_nightly_cargo(&["gc"])
+        .env("CARGO_BUILD_BUILD_DIR", &shared_build_dir)
+        .run();
+    assert_eq!(build_units.join("local").read_dir().unwrap().count(), 1);
+}
+
+#[cargo_test]
 fn binary_with_debug() {
     let p = project()
         .file("src/main.rs", r#"fn main() { println!("Hello, World!") }"#)

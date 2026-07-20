@@ -1,6 +1,6 @@
 use crate::sources::CRATES_IO_DOMAIN;
 
-pub use self::cargo_clean::{CleanContext, CleanOptions, clean};
+pub use self::cargo_clean::{CleanContext, CleanOptions, clean, gc_build_dir};
 pub use self::cargo_compile::unit_generator::UnitGenerator;
 pub use self::cargo_compile::{CompileFilter, FilterRule, LibRule, Packages};
 pub use self::cargo_compile::{
