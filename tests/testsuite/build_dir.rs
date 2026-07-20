@@ -10,6 +10,11 @@
 
 use std::path::PathBuf;
 
+use crate::prelude::*;
+use cargo_test_support::registry::{Package, RegistryBuilder};
+use cargo_test_support::{paths, prelude::*, project, str};
+use std::env::consts::{DLL_PREFIX, DLL_SUFFIX, EXE_SUFFIX};
+
 #[cargo_test]
 fn shared_build_dir_separates_path_units_by_workspace_inode() {
     Package::new("shared-dep", "1.0.0")
@@ -71,23 +76,23 @@ fn shared_build_dir_separates_path_units_by_workspace_inode() {
     assert_eq!(build_units.join("local").read_dir().unwrap().count(), 1);
 }
 
-
-use crate::prelude::*;
-use cargo_test_support::registry::{Package, RegistryBuilder};
-use cargo_test_support::{paths, prelude::*, project, str};
-use std::env::consts::{DLL_PREFIX, DLL_SUFFIX, EXE_SUFFIX};
-
 #[cargo_test]
-fn shared_v2_build_dir_and_fine_grain_locking_are_defaults() {
+fn target_dir_does_not_override_shared_build_dir_default() {
     let project = project().file("src/main.rs", "fn main() {}").build();
 
-    project.cargo("build").run();
+    project
+        .cargo("build")
+        .env("CARGO_BUILD_TARGET_DIR", "target-dir")
+        .run();
 
-    assert_exists(&project.root().join(format!("target/debug/foo{EXE_SUFFIX}")));
+    assert_exists(
+        &project
+            .root()
+            .join(format!("target-dir/debug/foo{EXE_SUFFIX}")),
+    );
     assert_exists_patterns_with_base_dir(&paths::home(), &[".cargo/build/debug/build/foo/*/.lock"]);
     project.cargo("clean gc --max-build-age=30days").run();
 }
-
 
 #[cargo_test]
 fn binary_with_debug() {
