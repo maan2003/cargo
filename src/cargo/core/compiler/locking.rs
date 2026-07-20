@@ -13,8 +13,11 @@ use std::{
     fmt::{Display, Formatter},
     path::PathBuf,
     sync::RwLock,
+    time::Duration,
 };
 use tracing::instrument;
+
+const LAST_USED_UPDATE_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// A struct to store the lock handles for build units during compilation.
 pub struct LockManager {
@@ -46,6 +49,7 @@ impl LockManager {
         let mut locks = self.locks.write().unwrap();
         if let Some(lock) = locks.get_mut(&key) {
             flock::lock_shared(lock.file())?;
+            update_last_used(lock);
         } else {
             let fs = Filesystem::new(key.0.clone());
             let lock_msg = format!(
@@ -54,6 +58,7 @@ impl LockManager {
                 build_runner.files().unit_hash(unit)
             );
             let lock = fs.open_ro_shared_create(&key.0, build_runner.bcx.gctx, &lock_msg)?;
+            update_last_used(&lock);
             locks.insert(key.clone(), lock);
         }
 
@@ -91,6 +96,24 @@ impl LockManager {
         };
 
         Ok(())
+    }
+}
+
+fn update_last_used(lock: &FileLock) {
+    let Ok(modified) = lock
+        .file()
+        .metadata()
+        .and_then(|metadata| metadata.modified())
+    else {
+        return;
+    };
+    if modified
+        .elapsed()
+        .is_ok_and(|elapsed| elapsed >= LAST_USED_UPDATE_INTERVAL)
+    {
+        // The lock is visited for every unit in the active graph, including
+        // fresh dependencies, making its mtime a cheap approximate last-use time.
+        cargo_util::paths::set_file_time_no_err(lock.path(), filetime::FileTime::now());
     }
 }
 

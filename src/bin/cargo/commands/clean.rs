@@ -38,9 +38,18 @@ pub fn cli() -> Command {
                 .about("Clean global caches")
                 .hide(true)
                 .arg_silent_suggestion()
+                .arg_manifest_path()
                 .arg_dry_run("Display what would be deleted without deleting anything")
                 // NOTE: Not all of these options may get stabilized. Some of them are
                 // very low-level details, and may not be something typical users need.
+                .arg(
+                    opt(
+                        "max-build-age",
+                        "Deletes build units that have not been used since the given age (unstable)",
+                    )
+                    .value_name("DURATION")
+                    .value_parser(parse_time_span),
+                )
                 .arg(
                     opt(
                         "max-src-age",
@@ -183,6 +192,10 @@ fn gc(gctx: &GlobalContext, args: &ArgMatches) -> CliResult {
 
     let size_opt = |opt| -> Option<u64> { args.get_one::<u64>(opt).copied() };
     let duration_opt = |opt| -> Option<Duration> { args.get_one::<Duration>(opt).copied() };
+    let max_build_age = duration_opt("max-build-age");
+    let build_dir = max_build_age
+        .map(|_| args.workspace(gctx).map(|workspace| workspace.build_dir()))
+        .transpose()?;
     let mut gc_opts = GcOpts {
         max_src_age: duration_opt("max-src-age"),
         max_crate_age: duration_opt("max-crate-age"),
@@ -199,7 +212,7 @@ fn gc(gctx: &GlobalContext, args: &ArgMatches) -> CliResult {
     }
     // If the user sets any options, then only perform the options requested.
     // If no options are set, do the default behavior.
-    if !gc_opts.is_download_cache_opt_set() {
+    if !gc_opts.is_download_cache_opt_set() && max_build_age.is_none() {
         gc_opts.update_for_auto_gc(gctx)?;
     }
 
@@ -209,6 +222,9 @@ fn gc(gctx: &GlobalContext, args: &ArgMatches) -> CliResult {
     let mut clean_ctx = CleanContext::new(gctx);
     clean_ctx.dry_run = args.dry_run();
     gc.gc(&mut clean_ctx, &gc_opts)?;
+    if let (Some(build_dir), Some(max_age)) = (build_dir, max_build_age) {
+        ops::gc_build_dir(&mut clean_ctx, build_dir.as_path_unlocked(), max_age)?;
+    }
     clean_ctx.display_summary()?;
     Ok(())
 }

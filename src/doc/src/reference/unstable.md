@@ -1626,6 +1626,7 @@ Deletion of cache contents can be performed by passing one of the cache options:
 - `--max-git-co-age=DURATION` --- Deletes git dependency checkouts that have not been used since then given age.
 - `--max-git-db-age=DURATION` --- Deletes git dependency clones that have not been used since then given age.
 - `--max-download-age=DURATION` --- Deletes any downloaded cache data that has not been used since then given age.
+- `--max-build-age=DURATION` --- Deletes v2 build units that have not been used since the given age.
 - `--max-src-size=SIZE` --- Deletes the oldest source cache files until the cache is under the given size.
 - `--max-crate-size=SIZE` --- Deletes the oldest crate cache files until the cache is under the given size.
 - `--max-git-size=SIZE` --- Deletes the oldest git dependency caches until the cache is under the given size.
