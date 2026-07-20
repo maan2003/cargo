@@ -72,7 +72,7 @@ rustc-workspace-wrapper = "…" # run this wrapper instead of `rustc` for worksp
 rustdoc = "rustdoc"           # the doc generator tool
 target = "triple"             # build for the target triple (ignored by `cargo install`)
 target-dir = "target"         # path of where to place generated artifacts
-build-dir = "target"          # path of where to place intermediate build artifacts
+build-dir = "{cargo-cache-home}/build" # intermediate build artifacts
 rustflags = ["…", "…"]        # custom flags to pass to all compiler invocations
 rustdocflags = ["…", "…"]     # custom flags to pass to rustdoc
 incremental = true            # whether or not to enable incremental compilation
@@ -559,7 +559,7 @@ For more information see the [build cache documentation](../reference/build-cach
 #### `build.build-dir`
 
 * Type: string (path)
-* Default: Defaults to the value of `build.target-dir`
+* Default: `"{cargo-cache-home}/build"`
 * Environment: `CARGO_BUILD_BUILD_DIR`
 
 The directory where intermediate build artifacts will be stored.
