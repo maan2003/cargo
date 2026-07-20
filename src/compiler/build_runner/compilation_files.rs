@@ -4,6 +4,7 @@ use crate::util::data_structures::HashMap;
 use std::cell::OnceCell;
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -166,17 +167,21 @@ impl<'a, 'gctx: 'a> CompilationFiles<'a, 'gctx> {
         build_runner: &BuildRunner<'a, 'gctx>,
         host: Layout,
         target: HashMap<CompileTarget, Layout>,
-    ) -> CompilationFiles<'a, 'gctx> {
+    ) -> CargoResult<CompilationFiles<'a, 'gctx>> {
+        // Filesystem identity is stable when the same worktree is bind-mounted at
+        // different paths while still distinguishing separate worktrees.
+        let workspace_metadata = std::fs::metadata(build_runner.bcx.ws.root())?;
+        let workspace_id = (workspace_metadata.dev(), workspace_metadata.ino());
         let mut metas = HashMap::default();
         for unit in &build_runner.bcx.roots {
-            metadata_of(unit, build_runner, &mut metas);
+            metadata_of(unit, build_runner, &mut metas, workspace_id);
         }
         let outputs = metas
             .keys()
             .cloned()
             .map(|unit| (unit, OnceCell::new()))
             .collect();
-        CompilationFiles {
+        Ok(CompilationFiles {
             ws: build_runner.bcx.ws,
             host,
             target,
@@ -184,7 +189,7 @@ impl<'a, 'gctx: 'a> CompilationFiles<'a, 'gctx> {
             roots: build_runner.bcx.roots.clone(),
             metas,
             outputs,
-        }
+        })
     }
 
     /// Returns the appropriate directory layout for either a plugin or not.
@@ -701,12 +706,13 @@ fn metadata_of<'a>(
     unit: &Unit,
     build_runner: &BuildRunner<'_, '_>,
     metas: &'a mut HashMap<Unit, Metadata>,
+    workspace_id: (u64, u64),
 ) -> &'a Metadata {
     if !metas.contains_key(unit) {
-        let meta = compute_metadata(unit, build_runner, metas);
+        let meta = compute_metadata(unit, build_runner, metas, workspace_id);
         metas.insert(unit.clone(), meta);
         for dep in build_runner.unit_deps(unit) {
-            metadata_of(&dep.unit, build_runner, metas);
+            metadata_of(&dep.unit, build_runner, metas, workspace_id);
         }
     }
     &metas[unit]
@@ -717,12 +723,13 @@ fn compute_metadata(
     unit: &Unit,
     build_runner: &BuildRunner<'_, '_>,
     metas: &mut HashMap<Unit, Metadata>,
+    workspace_id: (u64, u64),
 ) -> Metadata {
     let bcx = &build_runner.bcx;
     let deps_metadata = build_runner
         .unit_deps(unit)
         .iter()
-        .map(|dep| *metadata_of(&dep.unit, build_runner, metas))
+        .map(|dep| *metadata_of(&dep.unit, build_runner, metas, workspace_id))
         .collect::<Vec<_>>();
     let c_extra_filename = use_extra_filename(bcx, unit);
     let pkg_dir = use_pkg_dir(bcx, unit);
@@ -829,6 +836,12 @@ fn compute_metadata(
     dep_c_metadata_hashes.hash(&mut c_metadata_hasher);
 
     let mut unit_id_hasher = shared_hasher.clone();
+    if !unit.is_std && unit.pkg.package_id().source_id().is_path() {
+        // Path sources are mutable, so they must not share a mutable build-unit
+        // directory with another worktree. Immutable registry and git sources
+        // intentionally remain shareable across workspaces.
+        workspace_id.hash(&mut unit_id_hasher);
+    }
     // Mix in the target-metadata of all the dependencies of this target.
     let mut dep_unit_id_hashes = deps_metadata.iter().map(|m| m.unit_id).collect::<Vec<_>>();
     dep_unit_id_hashes.sort();

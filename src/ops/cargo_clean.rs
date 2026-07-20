@@ -5,7 +5,7 @@ use crate::util::data_structures::{IndexMap, IndexSet};
 use crate::util::edit_distance;
 use crate::util::errors::CargoResult;
 use crate::util::interning::InternedString;
-use crate::util::{GlobalContext, Progress, ProgressStyle};
+use crate::util::{Filesystem, GlobalContext, Progress, ProgressStyle};
 use crate::workspace::profiles::Profiles;
 use crate::workspace::{PackageIdSpec, PackageIdSpecQuery, TargetKind, Workspace};
 use anyhow::bail;
@@ -16,6 +16,7 @@ use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::{Duration, SystemTime};
 use std::{fs, io};
 
 pub struct CleanOptions<'gctx> {
@@ -141,6 +142,80 @@ pub fn clean(ws: &Workspace<'_>, opts: &CleanOptions<'_>) -> CargoResult<()> {
 
     clean_ctx.display_summary()?;
     Ok(())
+}
+
+/// Removes v2 build units that have not been used within `max_age`.
+pub fn gc_build_dir(
+    clean_ctx: &mut CleanContext<'_>,
+    build_dir: &Path,
+    max_age: Duration,
+) -> CargoResult<()> {
+    if !build_dir.exists() {
+        return Ok(());
+    }
+
+    let profile_dirs = walkdir::WalkDir::new(build_dir)
+        .min_depth(2)
+        .max_depth(3)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name() == ".cargo-build-lock")
+        .filter_map(|entry| entry.path().parent().map(Path::to_owned))
+        .collect::<Vec<_>>();
+    let now = SystemTime::now();
+    let mut paths_to_remove = Vec::new();
+    let mut trash_index = 0usize;
+
+    for profile_dir in profile_dirs {
+        let profile = Filesystem::new(profile_dir.clone());
+        let _lock = profile.open_rw_exclusive_create(
+            ".cargo-build-lock",
+            clean_ctx.gctx,
+            "build directory garbage collection",
+        )?;
+        let units_dir = profile_dir.join("build");
+        let Ok(packages) = units_dir.read_dir() else {
+            continue;
+        };
+
+        for package in packages {
+            let package = package?;
+            if !package.file_type()?.is_dir() {
+                continue;
+            }
+            for unit in package.path().read_dir()? {
+                let unit = unit?;
+                if !unit.file_type()?.is_dir() {
+                    continue;
+                }
+                let lock_path = unit.path().join(".lock");
+                let Ok(modified) = lock_path
+                    .metadata()
+                    .and_then(|metadata| metadata.modified())
+                else {
+                    continue;
+                };
+                if now.duration_since(modified).unwrap_or_default() < max_age {
+                    continue;
+                }
+
+                if clean_ctx.dry_run {
+                    paths_to_remove.push(unit.path());
+                } else {
+                    let trash = profile_dir
+                        .join(".gc-trash")
+                        .join(std::process::id().to_string())
+                        .join(trash_index.to_string());
+                    trash_index += 1;
+                    paths::create_dir_all(trash.parent().unwrap())?;
+                    fs::rename(unit.path(), &trash)?;
+                    paths_to_remove.push(trash);
+                }
+            }
+        }
+    }
+
+    clean_ctx.remove_paths(&paths_to_remove)
 }
 
 fn validate_target_dir_tag(target_dir_path: &Path) -> CargoResult<()> {
