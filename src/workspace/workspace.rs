@@ -266,7 +266,11 @@ impl<'gctx> Workspace<'gctx> {
             requested_lockfile_path: None,
             resolve_behavior: ResolveBehavior::V1,
             resolve_honors_rust_version: false,
-            resolve_feature_unification: FeatureUnification::Selected,
+            // This fork unifies features across the whole workspace by
+            // default. Per-package resolution rebuilds a dependency once per
+            // feature set, which defeats the shared build cache: a `-p` build
+            // of one crate could not reuse the units a workspace build made.
+            resolve_feature_unification: FeatureUnification::Workspace,
             resolve_honors_publish_age: true,
             resolve_publish_time: None,
             custom_metadata: None,
@@ -348,15 +352,12 @@ impl<'gctx> Workspace<'gctx> {
             self.resolve_honors_rust_version =
                 incompatible_rust_versions == IncompatibleRustVersions::Fallback;
         }
-        if self.gctx().cli_unstable().feature_unification {
-            self.resolve_feature_unification = config
-                .feature_unification
-                .unwrap_or(FeatureUnification::Selected);
-        } else if config.feature_unification.is_some() {
-            self.gctx()
-                .shell()
-                .warn("ignoring `resolver.feature-unification` without `-Zfeature-unification`")?;
-        };
+        // Honoured without `-Zfeature-unification`, since workspace
+        // unification is this fork's default; the config is how you opt back
+        // out to `package` or `selected`.
+        self.resolve_feature_unification = config
+            .feature_unification
+            .unwrap_or(FeatureUnification::Workspace);
 
         if !self.gctx().cli_unstable().min_publish_age {
             if config.incompatible_publish_age.is_some() {
