@@ -1627,6 +1627,95 @@ fn a_unit_another_build_reads_with_other_settings_fails_at_the_deadline() {
 }
 
 #[cargo_test]
+fn a_build_script_another_build_runs_is_run_once() {
+    // The script runs until `GO` exists, and logs each run in `RUN_LOG`.
+    Package::new("scripted", "1.0.0")
+        .file(
+            "build.rs",
+            r#"
+                use std::io::Write;
+                fn main() {
+                    println!("cargo::rerun-if-env-changed=SCRIPT_MODE");
+                    let mode = std::env::var("SCRIPT_MODE").unwrap();
+                    let mut log = std::fs::OpenOptions::new()
+                        .append(true)
+                        .create(true)
+                        .open(std::env::var("RUN_LOG").unwrap())
+                        .unwrap();
+                    writeln!(log, "{mode}").unwrap();
+                    let go = std::env::var("GO").unwrap();
+                    while !std::path::Path::new(&go).exists() {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    let out = std::path::Path::new(&std::env::var("OUT_DIR").unwrap()).join("mode.rs");
+                    std::fs::write(out, format!("pub const MODE: &str = {mode:?};")).unwrap();
+                }
+            "#,
+        )
+        .file("src/lib.rs", r#"include!(concat!(env!("OUT_DIR"), "/mode.rs"));"#)
+        .publish();
+    let projects: Vec<_> = ["first", "second"]
+        .iter()
+        .map(|name| {
+            project()
+                .at(name)
+                .file(
+                    "Cargo.toml",
+                    &format!(
+                        "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nscripted = \"1.0\"\n"
+                    ),
+                )
+                .file("src/lib.rs", "pub fn f() -> &'static str { scripted::MODE }")
+                .build()
+        })
+        .collect();
+    // `second` starts while the script runs for `first`, so it plans the script as dirty.
+    let round = |name: &str, modes: [&str; 2]| -> Vec<String> {
+        let build_dir = paths::root().join(format!("{name}-build"));
+        let log = paths::root().join(format!("{name}.log"));
+        let go = paths::root().join(format!("{name}.go"));
+        let spawn = |p: &cargo_test_support::Project, mode: &str| {
+            let mut cmd = p
+                .cargo("-Zbuild-dir-new-layout -Zfine-grain-locking build")
+                .masquerade_as_nightly_cargo(&["new build-dir layout", "fine grain locking"])
+                .env("CARGO_BUILD_BUILD_DIR", &build_dir)
+                .env("SCRIPT_MODE", mode)
+                .env("RUN_LOG", &log)
+                .env("GO", &go)
+                .build_command();
+            cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+            cmd.spawn().unwrap()
+        };
+        let first = spawn(&projects[0], modes[0]);
+        let deadline = Instant::now() + slow_cpu_multiplier(60);
+        while !log.exists() {
+            assert!(Instant::now() < deadline, "the build script did not start");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let second = spawn(&projects[1], modes[1]);
+        std::thread::sleep(Duration::from_secs(2));
+        std::fs::write(&go, "").unwrap();
+        for child in [first, second] {
+            let out = child.wait_with_output().unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(String::from)
+            .collect()
+    };
+    // `second` takes the script's output, as it reads the env var with the value it sees.
+    assert_eq!(round("same", ["a", "a"]), ["a"]);
+    // With another value, `second` runs the script again once `first` is done with it.
+    assert_eq!(round("other", ["a", "b"]), ["a", "b"]);
+}
+
+#[cargo_test]
 fn another_linker_gets_units_of_its_own() {
     Package::new("shared-dep", "1.0.0")
         .file("src/lib.rs", "pub fn shared() {}")

@@ -278,8 +278,11 @@ impl LinkArgTarget {
 }
 
 /// Prepares a `Work` that executes the target as a custom build script.
+///
+/// Also returns the work to run instead if the job is dirty but another cargo runs the script
+/// first, see [`super::compile`].
 #[tracing::instrument(skip_all)]
-pub fn prepare(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResult<Job> {
+pub fn prepare(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResult<(Job, Work)> {
     let metadata = build_runner.get_run_build_script_metadata(unit);
     if build_runner
         .build_script_outputs
@@ -288,7 +291,10 @@ pub fn prepare(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResu
         .contains_key(metadata)
     {
         // The output is already set, thus the build script is overridden.
-        fingerprint::prepare_target(build_runner, unit, false)
+        Ok((
+            fingerprint::prepare_target(build_runner, unit, false)?,
+            Work::noop(),
+        ))
     } else {
         build_work(build_runner, unit)
     }
@@ -329,7 +335,7 @@ fn emit_build_output(
 /// * Create the output dir (`OUT_DIR`) for the build script output.
 /// * Determine if the build script needs a re-run.
 /// * Run the build script and store its output.
-fn build_work(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResult<Job> {
+fn build_work(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResult<(Job, Work)> {
     assert!(unit.mode.is_run_custom_build());
     let bcx = &build_runner.bcx;
     let dependencies = build_runner.unit_deps(unit);
@@ -748,10 +754,11 @@ fn build_work(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResul
     let mut job = fingerprint::prepare_target(build_runner, unit, false)?;
     if job.freshness().is_dirty() {
         job.before(fingerprint::clear(build_runner, unit).then(dirty));
+        Ok((job, fresh))
     } else {
         job.before(fresh);
+        Ok((job, Work::noop()))
     }
-    Ok(job)
 }
 
 /// When a build script run fails, store only log messages, and nuke other

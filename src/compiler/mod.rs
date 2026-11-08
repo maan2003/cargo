@@ -231,58 +231,60 @@ fn compile<'gctx>(
         // we've got everything constructed.
         fingerprint::prepare_init(build_runner, unit)?;
 
-        let job = if unit.mode.is_run_custom_build() {
+        // `fresh` is the work that the job runs instead if it is dirty but another cargo
+        // sharing the build directory builds the unit first (see below).
+        let (mut job, fresh) = if unit.mode.is_run_custom_build() {
             custom_build::prepare(build_runner, unit)?
         } else if unit.mode.is_doc_test() {
             // We run these targets later, so this is just a no-op for now.
-            Job::new_fresh()
+            (Job::new_fresh(), Work::noop())
         } else {
             let force = exec.force_rebuild(unit) || force_rebuild;
             let mut job = fingerprint::prepare_target(build_runner, unit, force)?;
-            job.before(if job.freshness().is_dirty() {
+            if job.freshness().is_dirty() {
                 let work = if unit.mode.is_doc() || unit.mode.is_doc_scrape() {
                     rustdoc(build_runner, unit)?
                 } else {
                     rustc(build_runner, unit, exec)?
                 };
-                fingerprint::clear(build_runner, unit)
-                    .then(work)
-                    .then(link_targets(build_runner, unit, false)?)
+                job.before(
+                    fingerprint::clear(build_runner, unit)
+                        .then(work)
+                        .then(link_targets(build_runner, unit, false)?),
+                );
+                (job, fresh_work(build_runner, unit)?)
             } else {
-                fresh_work(build_runner, unit)?
-            });
-
-            // If -Zfine-grain-locking is enabled, the job takes the unit's exclusive lock before
-            // compiling, then downgrades it to a shared lock, which it holds for the remainder of
-            // the build so that no other cargo recompiles the unit while we use it.
-            //
-            // It never blocks on the exclusive lock: another cargo that holds the unit shared
-            // keeps it until its build ends, and may itself wait for a unit that we hold. So when
-            // the exclusive lock is taken, the job waits for a shared lock (which waits only for a
-            // cargo that is compiling the unit) and checks the fingerprint again: if the other
-            // cargo built the unit as we would have, the job is the fresh one instead.
-            if build_runner.bcx.gctx.cli_unstable().fine_grain_locking && job.freshness().is_dirty()
-            {
-                if let Some(lock) = lock {
-                    build_runner.lock_manager.unlock(&lock)?;
-                    let fresh = fresh_work(build_runner, unit)?;
-                    let recheck = fingerprint::recheck(build_runner, unit)?;
-                    let name = format!("{} ({})", unit.pkg, unit.target.description_named());
-                    job.wrap(move |dirty| {
-                        Work::new(move |state| {
-                            if state.lock_to_build(&lock, recheck, &name)? {
-                                dirty.call(state)?;
-                                state.downgrade_to_shared(&lock)
-                            } else {
-                                fresh.call(state)
-                            }
-                        })
-                    });
-                }
+                job.before(fresh_work(build_runner, unit)?);
+                (job, Work::noop())
             }
-
-            job
         };
+
+        // If -Zfine-grain-locking is enabled, the job takes the unit's exclusive lock before
+        // building it, then downgrades it to a shared lock, which it holds for the remainder of
+        // the build so that no other cargo rebuilds the unit while we use it.
+        //
+        // It never blocks on the exclusive lock: another cargo that holds the unit shared
+        // keeps it until its build ends, and may itself wait for a unit that we hold. So when
+        // the exclusive lock is taken, the job waits for a shared lock (which waits only for a
+        // cargo that is building the unit) and checks the fingerprint again: if the other
+        // cargo built the unit as we would have, the job runs `fresh` instead.
+        if let Some(lock) = lock
+            && job.freshness().is_dirty()
+        {
+            build_runner.lock_manager.unlock(&lock)?;
+            let recheck = fingerprint::recheck(build_runner, unit)?;
+            let name = format!("{} ({})", unit.pkg, unit.target.description_named());
+            job.wrap(move |dirty| {
+                Work::new(move |state| {
+                    if state.lock_to_build(&lock, recheck, &name)? {
+                        dirty.call(state)?;
+                        state.downgrade_to_shared(&lock)
+                    } else {
+                        fresh.call(state)
+                    }
+                })
+            });
+        }
         jobs.enqueue(build_runner, unit, job)?;
     }
 

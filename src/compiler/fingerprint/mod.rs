@@ -604,17 +604,48 @@ pub fn clear(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> Work {
 /// Whether the fingerprint on disk of a unit that [`prepare_target`] found dirty is now the
 /// one this build would write: another cargo, sharing the build directory, has built the unit
 /// since. Call it when the unit's dependencies are done, as their fingerprints are part of it.
+///
+/// The local inputs are the ones the other cargo recorded, as a build script tells only when it
+/// runs which files and env vars it reads; the env vars must have the values that this cargo
+/// sees. If the unit is fresh, its fingerprint takes these inputs.
 pub fn recheck(
     build_runner: &mut BuildRunner<'_, '_>,
     unit: &Unit,
 ) -> CargoResult<impl Fn() -> CargoResult<bool> + Send + 'static> {
     let loc = build_runner.files().fingerprint_file_path(unit, "");
     let fingerprint = calculate(build_runner, unit)?;
+    let env_config = Arc::clone(build_runner.bcx.gctx.env_config()?);
     Ok(move || {
-        let Ok(on_disk) = paths::read(&loc) else {
+        let (Ok(on_disk), Ok(json)) = (paths::read(&loc), paths::read(&loc.with_extension("json")))
+        else {
             return Ok(false);
         };
-        Ok(on_disk == util::to_hex(fingerprint.hash_u64()))
+        let Ok(theirs) = serde_json::from_str::<Fingerprint>(&json) else {
+            return Ok(false);
+        };
+        let local = theirs
+            .local
+            .into_inner()
+            .unwrap()
+            .into_iter()
+            .map(|local| match local {
+                LocalFingerprint::RerunIfEnvChanged { var, .. } => {
+                    LocalFingerprint::from_env(var, &env_config)
+                }
+                local => local,
+            })
+            .collect::<Vec<_>>();
+        let mut ours = serde_json::to_value(&*fingerprint)?;
+        ours["local"] = serde_json::to_value(&local)?;
+        let ours: Fingerprint = serde_json::from_value(ours)?;
+        if on_disk != util::to_hex(ours.hash_u64()) {
+            return Ok(false);
+        }
+        // The units that depend on this one fingerprint it with these inputs, as the other
+        // cargo's units do.
+        *fingerprint.local.lock().unwrap() = local;
+        fingerprint.clear_memoized();
+        Ok(true)
     })
 }
 
