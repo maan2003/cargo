@@ -747,7 +747,7 @@ fn build_work(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResul
 
     let mut job = fingerprint::prepare_target(build_runner, unit, false)?;
     if job.freshness().is_dirty() {
-        job.before(dirty);
+        job.before(fingerprint::clear(build_runner, unit).then(dirty));
     } else {
         job.before(fresh);
     }

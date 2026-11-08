@@ -516,40 +516,6 @@ pub fn prepare_target(
         .ok_or_else(|| internal("missing package source"))?;
     source.verify(unit.pkg.package_id())?;
 
-    // Clear out the old fingerprint file if it exists. This protects when
-    // compilation is interrupted leaving a corrupt file. For example, a
-    // project with a lib.rs and integration test (two units):
-    //
-    // 1. Build the library and integration test.
-    // 2. Make a change to lib.rs (NOT the integration test).
-    // 3. Build the integration test, hit Ctrl-C while linking. With gcc, this
-    //    will leave behind an incomplete executable (zero size, or partially
-    //    written). NOTE: The library builds successfully, it is the linking
-    //    of the integration test that we are interrupting.
-    // 4. Build the integration test again.
-    //
-    // Without the following line, then step 3 will leave a valid fingerprint
-    // on the disk. Then step 4 will think the integration test is "fresh"
-    // because:
-    //
-    // - There is a valid fingerprint hash on disk (written in step 1).
-    // - The mtime of the output file (the corrupt integration executable
-    //   written in step 3) is newer than all of its dependencies.
-    // - The mtime of the integration test fingerprint dep-info file (written
-    //   in step 1) is newer than the integration test's source files, because
-    //   we haven't modified any of its source files.
-    //
-    // But the executable is corrupt and needs to be rebuilt. Clearing the
-    // fingerprint at step 3 ensures that Cargo never mistakes a partially
-    // written output as up-to-date.
-    if loc.exists() {
-        // Truncate instead of delete so that compare_old_fingerprint will
-        // still log the reason for the fingerprint failure instead of just
-        // reporting "failed to read fingerprint" during the next build if
-        // this build fails.
-        paths::write(&loc, b"")?;
-    }
-
     let write_fingerprint = if unit.mode.is_run_custom_build() {
         // For build scripts the `local` field of the fingerprint may change
         // while we're executing it. For example it could be in the legacy
@@ -588,6 +554,51 @@ pub fn prepare_target(
     };
 
     Ok(Job::new_dirty(write_fingerprint, dirty_reason))
+}
+
+/// Work that a dirty unit runs first, before it builds: it clears the unit's fingerprint file.
+///
+/// It runs with the job, not when the build is planned: with `-Zfine-grain-locking`, another
+/// cargo may build the unit between the two, and clearing its fingerprint then would leave the
+/// unit dirty for every build that shares the build directory.
+pub fn clear(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> Work {
+    let loc = build_runner.files().fingerprint_file_path(unit, "");
+    Work::new(move |_| {
+        // Clears out the old fingerprint file if it exists. This protects when
+        // compilation is interrupted leaving a corrupt file. For example, a
+        // project with a lib.rs and integration test (two units):
+        //
+        // 1. Build the library and integration test.
+        // 2. Make a change to lib.rs (NOT the integration test).
+        // 3. Build the integration test, hit Ctrl-C while linking. With gcc, this
+        //    will leave behind an incomplete executable (zero size, or partially
+        //    written). NOTE: The library builds successfully, it is the linking
+        //    of the integration test that we are interrupting.
+        // 4. Build the integration test again.
+        //
+        // Without the following line, then step 3 will leave a valid fingerprint
+        // on the disk. Then step 4 will think the integration test is "fresh"
+        // because:
+        //
+        // - There is a valid fingerprint hash on disk (written in step 1).
+        // - The mtime of the output file (the corrupt integration executable
+        //   written in step 3) is newer than all of its dependencies.
+        // - The mtime of the integration test fingerprint dep-info file (written
+        //   in step 1) is newer than the integration test's source files, because
+        //   we haven't modified any of its source files.
+        //
+        // But the executable is corrupt and needs to be rebuilt. Clearing the
+        // fingerprint at step 3 ensures that Cargo never mistakes a partially
+        // written output as up-to-date.
+        if loc.exists() {
+            // Truncate instead of delete so that compare_old_fingerprint will
+            // still log the reason for the fingerprint failure instead of just
+            // reporting "failed to read fingerprint" during the next build if
+            // this build fails.
+            paths::write(&loc, b"")?;
+        }
+        Ok(())
+    })
 }
 
 /// Whether the fingerprint on disk of a unit that [`prepare_target`] found dirty is now the

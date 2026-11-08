@@ -245,7 +245,9 @@ fn compile<'gctx>(
                 } else {
                     rustc(build_runner, unit, exec)?
                 };
-                work.then(link_targets(build_runner, unit, false)?)
+                fingerprint::clear(build_runner, unit)
+                    .then(work)
+                    .then(link_targets(build_runner, unit, false)?)
             } else {
                 fresh_work(build_runner, unit)?
             });
