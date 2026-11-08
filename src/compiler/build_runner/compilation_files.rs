@@ -890,6 +890,15 @@ fn compute_metadata(
     let mut dep_unit_id_hashes = deps_metadata.iter().map(|m| m.unit_id).collect::<Vec<_>>();
     dep_unit_id_hashes.sort();
     dep_unit_id_hashes.hash(&mut unit_id_hasher);
+    // The linker is part of the fingerprint: builds with other linkers get units of their own,
+    // so that they do not take turns rebuilding one that they share in the build directory.
+    let linker = if unit.target.for_host() && !bcx.gctx.target_applies_to_host().unwrap_or_default()
+    {
+        build_runner.compilation.host_linker()
+    } else {
+        build_runner.compilation.target_linker(unit.kind)
+    };
+    linker.hash(&mut unit_id_hasher);
     // Avoid trashing the caches on RUSTFLAGS changing via `unit_id`
     //
     // Limited to `unit_id` to help with reproducible build / PGO issues.

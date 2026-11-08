@@ -99,7 +99,6 @@ use self::trim_paths::trim_paths_args_rustdoc;
 use self::unit_graph::UnitDep;
 
 use crate::compiler::future_incompat::FutureIncompatReport;
-use crate::compiler::locking::LockKey;
 use crate::compiler::timings::SectionTiming;
 pub use crate::compiler::unit::Unit;
 pub use crate::compiler::unit::UnitIndex;
@@ -248,33 +247,35 @@ fn compile<'gctx>(
                 };
                 work.then(link_targets(build_runner, unit, false)?)
             } else {
-                let output_options = OutputOptions::for_fresh(build_runner, unit);
-                let manifest = ManifestErrorContext::new(build_runner, unit);
-                let work = replay_output_cache(
-                    unit.pkg.package_id(),
-                    manifest,
-                    &unit.target,
-                    build_runner.files().message_cache_path(unit),
-                    output_options,
-                );
-                // Need to link targets on both the dirty and fresh.
-                work.then(link_targets(build_runner, unit, true)?)
+                fresh_work(build_runner, unit)?
             });
 
-            // If -Zfine-grain-locking is enabled, we wrap the job with an upgrade to exclusive
-            // lock before starting, then downgrade to a shared lock after the job is finished.
+            // If -Zfine-grain-locking is enabled, the job takes the unit's exclusive lock before
+            // compiling, then downgrades it to a shared lock, which it holds for the remainder of
+            // the build so that no other cargo recompiles the unit while we use it.
+            //
+            // It never blocks on the exclusive lock: another cargo that holds the unit shared
+            // keeps it until its build ends, and may itself wait for a unit that we hold. So when
+            // the exclusive lock is taken, the job waits for a shared lock (which waits only for a
+            // cargo that is compiling the unit) and checks the fingerprint again: if the other
+            // cargo built the unit as we would have, the job is the fresh one instead.
             if build_runner.bcx.gctx.cli_unstable().fine_grain_locking && job.freshness().is_dirty()
             {
                 if let Some(lock) = lock {
-                    // Here we unlock the current shared lock to avoid deadlocking with other cargo
-                    // processes. Then we configure our compile job to take an exclusive lock
-                    // before starting. Once we are done compiling (including both rmeta and rlib)
-                    // we downgrade to a shared lock to allow other cargo's to read the build unit.
-                    // We will hold this shared lock for the remainder of compilation to prevent
-                    // other cargo from re-compiling while we are still using the unit.
                     build_runner.lock_manager.unlock(&lock)?;
-                    job.before(prebuild_lock_exclusive(lock.clone()));
-                    job.after(downgrade_lock_to_shared(lock));
+                    let fresh = fresh_work(build_runner, unit)?;
+                    let recheck = fingerprint::recheck(build_runner, unit)?;
+                    let name = format!("{} ({})", unit.pkg, unit.target.description_named());
+                    job.wrap(move |dirty| {
+                        Work::new(move |state| {
+                            if state.lock_to_build(&lock, recheck, &name)? {
+                                dirty.call(state)?;
+                                state.downgrade_to_shared(&lock)
+                            } else {
+                                fresh.call(state)
+                            }
+                        })
+                    });
                 }
             }
 
@@ -680,18 +681,19 @@ fn verbose_if_simple_exit_code(err: Error) -> Error {
     }
 }
 
-fn prebuild_lock_exclusive(lock: LockKey) -> Work {
-    Work::new(move |state| {
-        state.lock_exclusive(&lock)?;
-        Ok(())
-    })
-}
-
-fn downgrade_lock_to_shared(lock: LockKey) -> Work {
-    Work::new(move |state| {
-        state.downgrade_to_shared(&lock)?;
-        Ok(())
-    })
+/// The work of a fresh unit: its cached compiler output replayed, and its outputs linked.
+fn fresh_work(build_runner: &mut BuildRunner<'_, '_>, unit: &Unit) -> CargoResult<Work> {
+    let output_options = OutputOptions::for_fresh(build_runner, unit);
+    let manifest = ManifestErrorContext::new(build_runner, unit);
+    let work = replay_output_cache(
+        unit.pkg.package_id(),
+        manifest,
+        &unit.target,
+        build_runner.files().message_cache_path(unit),
+        output_options,
+    );
+    // Need to link targets on both the dirty and fresh.
+    Ok(work.then(link_targets(build_runner, unit, true)?))
 }
 
 /// Link the compiled target (often of form `foo-{metadata_hash}`) to the

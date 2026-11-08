@@ -590,6 +590,23 @@ pub fn prepare_target(
     Ok(Job::new_dirty(write_fingerprint, dirty_reason))
 }
 
+/// Whether the fingerprint on disk of a unit that [`prepare_target`] found dirty is now the
+/// one this build would write: another cargo, sharing the build directory, has built the unit
+/// since. Call it when the unit's dependencies are done, as their fingerprints are part of it.
+pub fn recheck(
+    build_runner: &mut BuildRunner<'_, '_>,
+    unit: &Unit,
+) -> CargoResult<impl Fn() -> CargoResult<bool> + Send + 'static> {
+    let loc = build_runner.files().fingerprint_file_path(unit, "");
+    let fingerprint = calculate(build_runner, unit)?;
+    Ok(move || {
+        let Ok(on_disk) = paths::read(&loc) else {
+            return Ok(false);
+        };
+        Ok(on_disk == util::to_hex(fingerprint.hash_u64()))
+    })
+}
+
 /// Dependency edge information for fingerprints. This is generated for each
 /// dependency and is stored in a [`Fingerprint`].
 #[derive(Clone)]

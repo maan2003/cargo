@@ -12,10 +12,12 @@
 //! no unstable feature and the old build-dir layout respectively. New tests should be added to all when applicable.
 
 use std::path::PathBuf;
+use std::process::Stdio;
+use std::time::{Duration, Instant};
 
 use crate::prelude::*;
 use cargo_test_support::registry::{Package, RegistryBuilder};
-use cargo_test_support::{paths, prelude::*, project, str};
+use cargo_test_support::{paths, prelude::*, project, rustc_host, slow_cpu_multiplier, str};
 use std::env::consts::{DLL_PREFIX, DLL_SUFFIX, EXE_SUFFIX};
 
 #[cargo_test]
@@ -1460,6 +1462,198 @@ fn new_layout_opt_out() {
 [ROOT]/foo/target-dir/debug/foo.d
 
 "#]]);
+}
+
+/// Registry crates that take a while to compile, so that concurrent builds overlap.
+fn publish_slow_deps(n: usize) -> String {
+    let mut deps = String::new();
+    for i in 0..n {
+        let mut lib = String::new();
+        for k in 0..300 {
+            lib.push_str(&format!(
+                "pub fn f{k}(x: u64) -> u64 {{ (0..{}).fold(x, |a, b| a.wrapping_mul(31).rotate_left(b) ^ {k}) }}\n",
+                k % 40 + 1
+            ));
+        }
+        Package::new(&format!("slow{i}"), "1.0.0")
+            .file("src/lib.rs", &lib)
+            .publish();
+        deps.push_str(&format!("slow{i} = \"1.0\"\n"));
+    }
+    deps
+}
+
+#[cargo_test]
+fn concurrent_builds_sharing_a_build_dir_do_not_deadlock() {
+    // Each build plans every shared unit as dirty, compiles some of them, and keeps those locked
+    // shared until it ends: it must not wait for the exclusive lock of one that another holds.
+    let deps = publish_slow_deps(8);
+    let projects: Vec<_> = ["first", "second", "third"]
+        .iter()
+        .map(|name| {
+            project()
+                .at(name)
+                .file(
+                    "Cargo.toml",
+                    &format!(
+                        "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n{deps}"
+                    ),
+                )
+                .file("src/lib.rs", "pub fn f() -> u64 { slow0::f1(1) ^ slow7::f1(7) }")
+                .build()
+        })
+        .collect();
+    for round in 0..2 {
+        let build_dir = paths::root().join(format!("shared-build-{round}"));
+        let mut children: Vec<_> = projects
+            .iter()
+            .map(|p| {
+                let mut cmd = p
+                    .cargo("-Zbuild-dir-new-layout -Zfine-grain-locking build")
+                    .masquerade_as_nightly_cargo(&["new build-dir layout", "fine grain locking"])
+                    .env("CARGO_BUILD_BUILD_DIR", &build_dir)
+                    .build_command();
+                cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+                cmd.spawn().unwrap()
+            })
+            .collect();
+        let deadline = Instant::now() + slow_cpu_multiplier(120);
+        while children.iter_mut().any(|c| c.try_wait().unwrap().is_none()) {
+            if Instant::now() > deadline {
+                for c in &mut children {
+                    let _ = c.kill();
+                }
+                panic!("round {round}: concurrent builds did not finish, a lock wait cycle");
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        for c in children {
+            let out = c.wait_with_output().unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        // Built once, for all three.
+        for i in 0..8 {
+            let units = build_dir.join(format!("debug/build/slow{i}"));
+            assert_eq!(units.read_dir().unwrap().count(), 1);
+        }
+    }
+}
+
+#[cargo_test]
+fn a_unit_another_build_reads_with_other_settings_fails_at_the_deadline() {
+    Package::new("shared-dep", "1.0.0")
+        .file("src/lib.rs", "pub fn shared() {}")
+        .publish();
+    let manifest = |name: &str| {
+        format!(
+            "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nshared-dep = \"1.0\"\n"
+        )
+    };
+    // `first`'s build script waits while `first` holds shared-dep shared, as a fresh unit.
+    let first = project()
+        .at("first")
+        .file("Cargo.toml", &manifest("first"))
+        .file("src/lib.rs", "pub fn f() { shared_dep::shared() }")
+        .file(
+            "build.rs",
+            r#"
+                fn main() {
+                    println!("cargo::rerun-if-env-changed=WAIT_FOR");
+                    if let Ok(path) = std::env::var("WAIT_FOR") {
+                        std::fs::write(format!("{path}.ready"), "").unwrap();
+                        while !std::path::Path::new(&path).exists() {
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                        }
+                    }
+                }
+            "#,
+        )
+        .build();
+    let second = project()
+        .at("second")
+        .file("Cargo.toml", &manifest("second"))
+        .file("src/lib.rs", "pub fn f() { shared_dep::shared() }")
+        .build();
+    let build_dir = paths::root().join("shared-build");
+    let cargo = |p: &cargo_test_support::Project| {
+        let mut e = p.cargo("-Zbuild-dir-new-layout -Zfine-grain-locking build");
+        e.masquerade_as_nightly_cargo(&["new build-dir layout", "fine grain locking"])
+            .env("CARGO_BUILD_BUILD_DIR", &build_dir);
+        e
+    };
+    // Remaps keep RUSTFLAGS out of the units' ids: one unit directory, two fingerprints.
+    let first_flags = "--remap-path-prefix=/c=/d";
+    cargo(&first).env("RUSTFLAGS", first_flags).run();
+
+    let release = paths::root().join("release");
+    let mut held = cargo(&first)
+        .env("RUSTFLAGS", first_flags)
+        .env("WAIT_FOR", &release)
+        .build_command();
+    held.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let held = held.spawn().unwrap();
+    let ready = paths::root().join("release.ready");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !ready.exists() {
+        assert!(Instant::now() < deadline, "the build script did not start");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    cargo(&second)
+        .env("RUSTFLAGS", "--remap-path-prefix=/a=/b")
+        .env("__CARGO_TEST_FINE_GRAIN_LOCK_TIMEOUT_MS", "1000")
+        .with_status(101)
+        .with_stderr_contains(
+            "[ERROR] could not lock shared-dep v1.0.0 (lib) in the build directory for 1s: another cargo process uses it, built with settings that differ from this build's (lock [..])",
+        )
+        .run();
+
+    std::fs::write(&release, "").unwrap();
+    let out = held.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Once `first` is done, `second` gets the unit.
+    cargo(&second)
+        .env("RUSTFLAGS", "--remap-path-prefix=/a=/b")
+        .env("__CARGO_TEST_FINE_GRAIN_LOCK_TIMEOUT_MS", "1000")
+        .run();
+}
+
+#[cargo_test]
+fn another_linker_gets_units_of_its_own() {
+    Package::new("shared-dep", "1.0.0")
+        .file("src/lib.rs", "pub fn shared() {}")
+        .publish();
+    let p = project()
+        .file(
+            "Cargo.toml",
+            "[package]\nname = \"foo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nshared-dep = \"1.0\"\n",
+        )
+        .file("src/lib.rs", "pub fn f() { shared_dep::shared() }")
+        .build();
+    let build_dir = paths::root().join("shared-build");
+    let linker_var = format!(
+        "CARGO_TARGET_{}_LINKER",
+        rustc_host().to_uppercase().replace('-', "_")
+    );
+    for linker in [None, Some("cc")] {
+        let mut e = p.cargo("-Zbuild-dir-new-layout -Zfine-grain-locking build");
+        e.masquerade_as_nightly_cargo(&["new build-dir layout", "fine grain locking"])
+            .env("CARGO_BUILD_BUILD_DIR", &build_dir);
+        if let Some(linker) = linker {
+            e.env(&linker_var, linker);
+        }
+        e.run();
+    }
+    let units = build_dir.join("debug/build/shared-dep");
+    assert_eq!(units.read_dir().unwrap().count(), 2);
 }
 
 fn parse_workspace_manifest_path_hash(hash_dir: &PathBuf) -> PathBuf {

@@ -2027,7 +2027,8 @@ fn cargo_env_changes() {
 
 #[cargo_test]
 fn changing_linker() {
-    // Changing linker should rebuild.
+    // Changing linker should rebuild: the linker is part of the unit's id, so the build has
+    // units of its own.
     let p = project().file("src/main.rs", "fn main() {}").build();
     p.cargo("build").run();
     let linker_env = format!("CARGO_TARGET_{}_LINKER", rustc_host_env());
@@ -2035,7 +2036,6 @@ fn changing_linker() {
         .env(&linker_env, "nonexistent-linker")
         .with_status(101)
         .with_stderr_data(str![[r#"
-[DIRTY] foo v0.0.1 ([ROOT]/foo): the config settings changed
 [COMPILING] foo v0.0.1 ([ROOT]/foo)
 [RUNNING] `rustc --crate-name foo [..] -C linker=nonexistent-linker[..]`
 [ERROR] linker `nonexistent-linker` not found

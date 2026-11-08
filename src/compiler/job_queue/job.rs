@@ -86,10 +86,10 @@ impl Job {
         self.work = next.then(prev);
     }
 
-    /// Chains the given work by putting it after of our own unit of work.
-    pub fn after(&mut self, next: Work) {
+    /// Replaces our unit of work with the one `f` makes from it.
+    pub fn wrap(&mut self, f: impl FnOnce(Work) -> Work) {
         let prev = mem::replace(&mut self.work, Work::noop());
-        self.work = prev.then(next);
+        self.work = f(prev);
     }
 }
 

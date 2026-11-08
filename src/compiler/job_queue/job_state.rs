@@ -155,8 +155,14 @@ impl<'a, 'gctx> JobState<'a, 'gctx> {
             .push(Message::Finish(self.id, Artifact::Metadata, Ok(())));
     }
 
-    pub fn lock_exclusive(&self, lock: &LockKey) -> CargoResult<()> {
-        self.lock_manager.lock(lock)
+    /// See [`LockManager::lock_to_build`].
+    pub fn lock_to_build(
+        &self,
+        lock: &LockKey,
+        fresh: impl Fn() -> CargoResult<bool>,
+        unit: &str,
+    ) -> CargoResult<bool> {
+        self.lock_manager.lock_to_build(lock, fresh, unit)
     }
 
     pub fn downgrade_to_shared(&self, lock: &LockKey) -> CargoResult<()> {
